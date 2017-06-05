@@ -34,14 +34,14 @@ class Model(object):
         N, M, JX, JQ, VW, VC, W = \
             config.batch_size, config.max_num_sents, config.max_sent_size, \
             config.max_ques_size, config.word_vocab_size, config.char_vocab_size, config.max_word_size
-        self.x = tf.placeholder('int32', [N, None, None], name='x')
-        self.cx = tf.placeholder('int32', [N, None, None, W], name='cx')
-        self.x_mask = tf.placeholder('bool', [N, None, None], name='x_mask')
-        self.q = tf.placeholder('int32', [N, None], name='q')
-        self.cq = tf.placeholder('int32', [N, None, W], name='cq')
-        self.q_mask = tf.placeholder('bool', [N, None], name='q_mask')
-        self.y = tf.placeholder('bool', [N, None, None], name='y')
-        self.y2 = tf.placeholder('bool', [N, None, None], name='y2')
+        self.x = tf.placeholder('int32', [N, M, JX], name='x')
+        self.cx = tf.placeholder('int32', [N, M, JX, W], name='cx')
+        self.x_mask = tf.placeholder('bool', [N, M, JX], name='x_mask')
+        self.q = tf.placeholder('int32', [N, JQ], name='q')
+        self.cq = tf.placeholder('int32', [N, JQ, W], name='cq')
+        self.q_mask = tf.placeholder('bool', [N, JQ], name='q_mask')
+        self.y = tf.placeholder('bool', [N, M, JX], name='y')
+        self.y2 = tf.placeholder('bool', [N, M, JX], name='y2')
         self.is_train = tf.placeholder('bool', [], name='is_train')
         self.new_emb_mat = tf.placeholder('float', [None, config.word_emb_size], name='new_emb_mat')
 
@@ -64,8 +64,8 @@ class Model(object):
         if config.mode == 'train':
             self._build_ema()
 
-        self.summary = tf.merge_all_summaries()
-        self.summary = tf.merge_summary(tf.get_collection("summaries", scope=self.scope))
+        self.summary = tf.summary.merge_all()
+        self.summary = tf.summary.merge(tf.get_collection("summaries", scope=self.scope))
 
     def _build_forward(self):
         config = self.config
@@ -73,10 +73,12 @@ class Model(object):
             config.batch_size, config.max_num_sents, config.max_sent_size, \
             config.max_ques_size, config.word_vocab_size, config.char_vocab_size, config.hidden_size, \
             config.max_word_size
-        JX = tf.shape(self.x)[2]
-        JQ = tf.shape(self.q)[1]
-        print("M: ", M)
-        M = tf.shape(self.x)[1]
+        JX = config.max_sent_size
+        JQ = config.max_ques_size
+        M = config.max_num_sents
+        # JX = tf.shape(self.x)[2]
+        # JQ = tf.shape(self.q)[1]
+        # M = tf.shape(self.x)[1]
         dc, dw, dco = config.char_emb_size, config.word_emb_size, config.char_out_size
 
         with tf.variable_scope("emb"):
@@ -153,7 +155,6 @@ class Model(object):
         with tf.variable_scope("main"):
             if config.dynamic_att:
                 p0 = h
-                print("M : ", M)
                 u = tf.reshape(tf.tile(tf.expand_dims(u, 1), [1, M, 1, 1]), [N * M, JQ, 2 * d])
                 q_mask = tf.reshape(tf.tile(tf.expand_dims(self.q_mask, 1), [1, M, 1]), [N * M, JQ])
 
@@ -162,8 +163,7 @@ class Model(object):
                 first_cell_bw = AttentionCell(self.get_rnncell(), u, mask=q_mask, mapper='sim',
                                               input_keep_prob=self.config.input_keep_prob, is_train=self.is_train)
             else:
-                print("u_shape :", u.get_shape().as_list(), N, M)
-                r = inference(config, h, u, d)  #[N, 2*d]
+                r = inference(config, h, u, d)  #[N, M, 2*d]
                 p0 = attention_layer(config, self.is_train, h, u, r, h_mask=self.x_mask, u_mask=self.q_mask, scope="p0", tensor_dict=self.tensor_dict)
                 first_cell_fw = self.get_drnncell()
                 first_cell_bw = self.get_drnncell()
@@ -201,7 +201,7 @@ class Model(object):
             flat_logits2 = tf.reshape(logits2, [-1, M * JX])
             flat_yp2 = tf.nn.softmax(flat_logits2)
             yp2 = tf.reshape(flat_yp2, [-1, M, JX])
-            print("M 2: ", M)
+
             self.tensor_dict['g1'] = g1
             self.tensor_dict['g2'] = g2
 
@@ -221,9 +221,12 @@ class Model(object):
 
     def _build_loss(self):
         config = self.config
-        JX = tf.shape(self.x)[2]
-        M = tf.shape(self.x)[1]
-        JQ = tf.shape(self.q)[1]
+        # JX = tf.shape(self.x)[2]
+        # M = tf.shape(self.x)[1]
+        # JQ = tf.shape(self.q)[1]
+        JX = config.max_sent_size
+        JQ = config.max_ques_size
+        M = config.max_num_sents
         loss_mask = tf.reduce_max(tf.cast(self.q_mask, 'float'), 1)
         losses = tf.nn.softmax_cross_entropy_with_logits(logits=self.logits, labels=tf.cast(tf.reshape(self.y, [-1, M * JX]), 'float'))
         ce_loss = tf.reduce_mean(loss_mask * losses)
@@ -409,9 +412,12 @@ class Model(object):
 
 def bi_attention(config, is_train, h, u, h_mask=None, u_mask=None, scope=None, tensor_dict=None):
     with tf.variable_scope(scope or "bi_attention"):
-        JX = tf.shape(h)[2]
-        M = tf.shape(h)[1]
-        JQ = tf.shape(u)[1]
+        # JX = tf.shape(h)[2]
+        # M = tf.shape(h)[1]
+        # JQ = tf.shape(u)[1]
+        JX = config.max_sent_size
+        JQ = config.max_ques_size
+        M = config.max_num_sents
         h_aug = tf.tile(tf.expand_dims(h, 3), [1, 1, 1, JQ, 1])
         u_aug = tf.tile(tf.expand_dims(tf.expand_dims(u, 1), 1), [1, M, JX, 1, 1])
         if h_mask is None:
@@ -441,10 +447,13 @@ def bi_attention(config, is_train, h, u, h_mask=None, u_mask=None, scope=None, t
 
 def attention_layer(config, is_train, h, u, r, h_mask=None, u_mask=None, scope=None, tensor_dict=None):
     with tf.variable_scope(scope or "attention_layer"):
-        JX = tf.shape(h)[2]
-        M = tf.shape(h)[1]
-        JQ = tf.shape(u)[1]
-        r_expand = tf.tile(tf.expand_dims(tf.expand_dims(r, 1), 2), [1, M, JX, 1])
+        # JX = tf.shape(h)[2]
+        # M = tf.shape(h)[1]
+        # JQ = tf.shape(u)[1]
+        JX = config.max_sent_size
+        JQ = config.max_ques_size
+        M = config.max_num_sents
+        r_expand = tf.tile(tf.expand_dims(r, 2), [1, 1, JX, 1])
         if config.q2c_att or config.c2q_att:
             u_a, h_a = bi_attention(config, is_train, h, u, h_mask=h_mask, u_mask=u_mask, tensor_dict=tensor_dict)
         if not config.c2q_att:
@@ -458,57 +467,50 @@ def attention_layer(config, is_train, h, u, r, h_mask=None, u_mask=None, scope=N
 
 def get_attention(q_vec, prev_memory, fact_vec, reuse):
         """Use question vector and previous memory to create scalar attention for current fact"""
-        with tf.variable_scope("attention", reuse=None):
-            #memory = tf.reduce_sum(prev_memory, 1)
-            memory = prev_memory
+        with tf.variable_scope("attention", reuse=True):
+
             features = [fact_vec*q_vec,
-                        fact_vec*memory,
+                        fact_vec*prev_memory,
                         tf.abs(fact_vec - q_vec),
-                        tf.abs(fact_vec - memory)]
-            print("memory: ", memory.get_shape().as_list)
-            print("fact_vec: ", fact_vec.get_shape().as_list)
-            print("q_vec: ", q_vec.get_shape().as_list)
+                        tf.abs(fact_vec - prev_memory)]
+
             feature_vec = tf.concat(1, features)
-            #feature_vec = tf.pack(features, axis=1)
-            with tf.variable_scope('first_fnn', reuse=reuse) as scope:
-                #tf.get_variable('weights')
-                attention = tf.contrib.layers.fully_connected(feature_vec,
-                        60,
-                        activation_fn=tf.nn.tanh)
-                scope.reuse_variables()
-            with tf.variable_scope('second_fnn', reuse=reuse) as scope:
-                #tf.get_variable('weights')
-                attention = tf.contrib.layers.fully_connected(attention,
-                        1,
-                        activation_fn=None)
-                scope.reuse_variables()
+
+            attention = tf.layers.dense(feature_vec,
+                    60,
+                    activation=tf.nn.tanh,
+                    reuse=reuse)
+
+            attention = tf.layers.dense(attention,
+                    1,
+                    activation=None,
+                    reuse=reuse)
             
         return attention
 
 def generate_episode(memory, q_vec, fact_vecs, hop_index, N, d):
         """Generate episode by applying attention to current fact vectors through a modified GRU"""
-        #num_items = fact_vecs.get_shape()[1].value
-        #fact_vec = tf.reduce_sum(fact_vecs, 1)
-        attentions = [tf.squeeze(
-            get_attention(q_vec, memory, fact_vecs, bool(hop_index)), [1])]
 
+        attentions = [tf.squeeze(
+            get_attention(q_vec, memory, fv, bool(hop_index) or bool(i)), 1)
+            for i, fv in enumerate(tf.unpack(fact_vecs, axis=1))]
         #fv : [N, 2*d]
         attentions = tf.transpose(tf.pack(attentions))
-        #attentions.append(attentions)
-        print("attentions: ", attentions.get_shape())
+        attentions.append(attentions)
         attentions = tf.nn.softmax(attentions)
-        print("attentions: ", attentions.get_shape())
-        #attentions = tf.expand_dims(attentions, -1)    #[N, 1]
+        attentions = tf.expand_dims(attentions, -1)    #[N, M, 1]
 
         reuse = True if hop_index > 0 else False
         
         # concatenate fact vectors and attentions for input into attGRU
-        gru_inputs = tf.concat(1, [fact_vecs, attentions])  #[N, 2d+1]
-        gru_inputs = tf.expand_dims(gru_inputs, 1)
-        print("gru: ", gru_inputs.get_shape())
-        input_len = np.ones((N, ), dtype=np.int32)
+        gru_inputs = tf.concat(2, [fact_vecs, attentions])  #[N, M, 2d+1]
+        input_len = np.ones((N, 1), dtype=np.int32)
         with tf.variable_scope('attention_gru', reuse=reuse):
-            _, episode = tf.nn.dynamic_rnn(AttentionGRUCell(2*d), gru_inputs, dtype=np.float32, sequence_length=input_len)
+            _, episode = tf.nn.dynamic_rnn(AttentionGRUCell(2*d),
+                    gru_inputs,
+                    dtype=np.float32,
+                    sequence_length=input_len
+            )
 
         return episode
 
@@ -516,34 +518,36 @@ def inference(config, h, u, d):
     """Performs inference on the DMN model"""
 
     
-    JX = tf.shape(h)[2]
-    #N = tf.shape(h)[0]
-    M = tf.shape(h)[1]
-    JQ = tf.shape(u)[1]
+    # JX = tf.shape(h)[2]
+    # N = tf.shape(h)[0]
+    # M = tf.shape(h)[1]
+    # JQ = tf.shape(u)[1]
     N = config.batch_size
-    print("u : ", u.get_shape().as_list())
+    JX = config.max_sent_size
+    JQ = config.max_ques_size
+    M = config.max_num_sents
+
     q_vec = tf.reduce_sum(u, 1) #[N, 2*d]
-    print("q : ", q_vec.get_shape().as_list())
 
-    fact_vecs = tf.reduce_sum(tf.reduce_sum(h, 2), 1) #[N, 2*d]
 
-    with tf.variable_scope("memory", initializer=tf.contrib.layers.xavier_initializer()):
+    fact_vecs = tf.reduce_sum(h, 2) #[N, M, 2*d]
+
     # memory module
     # generate n_hops episodes
-        #prev_memory = tf.tile(tf.expand_dims(q_vec, 1), [1, M, 1])  #[N, M, 2*d]
-        prev_memory = q_vec #[N, 2*d]
-        num_hops = 3
+    prev_memory = tf.tile(tf.expand_dims(q_vec, 1), [1, M, 1])  #[N, M, 2*d]
+    num_hops = 3
 
-        for i in range(num_hops):
-            # get a new episode
-            #print '==> generating episode', i
-            episode = generate_episode(prev_memory, q_vec, fact_vecs, i, N, d)  #[N, 2*d]
+    for i in range(num_hops):
+        # get a new episode
+        #print '==> generating episode', i
+        episode = generate_episode(prev_memory, q_vec, fact_vecs, i, N, d)  #[N, M, 2*d]
 
-            # untied weights for memory update
-            with tf.variable_scope("hop_%d" % i):
-                prev_memory = tf.contrib.layers.fully_connected(tf.concat(1, [prev_memory, episode, q_vec]),
-                        2*d,
-                        activation_fn=tf.nn.relu)
-        output = prev_memory
-    
+        # untied weights for memory update
+        with tf.variable_scope("hop_%d" % i):
+            prev_memory = tf.layers.dense(tf.concat(2, [prev_memory, episode, q_vec]),
+                    2*d,
+                    activation=tf.nn.relu)
+
+    output = episode
+
     return output

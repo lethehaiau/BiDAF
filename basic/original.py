@@ -10,7 +10,6 @@ from my.tensorflow import get_initializer
 from my.tensorflow.nn import softsel, get_logits, highway_network, multi_conv1d
 from my.tensorflow.rnn import bidirectional_dynamic_rnn
 from my.tensorflow.rnn_cell import SwitchableDropoutWrapper, AttentionCell
-from basic.attention_gru_cell import AttentionGRUCell
 
 
 def get_multi_gpu_models(config):
@@ -18,7 +17,7 @@ def get_multi_gpu_models(config):
     for gpu_idx in range(config.num_gpus):
         with tf.name_scope("model_{}".format(gpu_idx)) as scope, tf.device("/{}:{}".format(config.device_type, gpu_idx)):
             model = Model(config, scope, rep=gpu_idx == 0)
-            #tf.get_variable_scope().reuse_variables()
+            tf.get_variable_scope().reuse_variables()
             models.append(model)
     return models
 
@@ -75,7 +74,6 @@ class Model(object):
             config.max_word_size
         JX = tf.shape(self.x)[2]
         JQ = tf.shape(self.q)[1]
-        print("M: ", M)
         M = tf.shape(self.x)[1]
         dc, dw, dco = config.char_emb_size, config.word_emb_size, config.char_out_size
 
@@ -134,53 +132,40 @@ class Model(object):
         self.tensor_dict['xx'] = xx
         self.tensor_dict['qq'] = qq
 
+        cell = BasicLSTMCell(d, state_is_tuple=True)
+        d_cell = SwitchableDropoutWrapper(cell, self.is_train, input_keep_prob=config.input_keep_prob)
         x_len = tf.reduce_sum(tf.cast(self.x_mask, 'int32'), 2)  # [N, M]
         q_len = tf.reduce_sum(tf.cast(self.q_mask, 'int32'), 1)  # [N]
 
         with tf.variable_scope("prepro"):
-            (fw_u, bw_u), ((_, fw_u_f), (_, bw_u_f)) = bidirectional_dynamic_rnn(self.get_drnncell(), self.get_drnncell(), qq, q_len, dtype='float', scope='u1')  # [N, J, d], [N, d]
+            (fw_u, bw_u), ((_, fw_u_f), (_, bw_u_f)) = bidirectional_dynamic_rnn(d_cell, d_cell, qq, q_len, dtype='float', scope='u1')  # [N, J, d], [N, d]
             u = tf.concat(2, [fw_u, bw_u])
             if config.share_lstm_weights:
                 tf.get_variable_scope().reuse_variables()
-                (fw_h, bw_h), _ = bidirectional_dynamic_rnn(self.get_rnncell(), self.get_rnncell(), xx, x_len, dtype='float', scope='u1')  # [N, M, JX, 2d]
+                (fw_h, bw_h), _ = bidirectional_dynamic_rnn(cell, cell, xx, x_len, dtype='float', scope='u1')  # [N, M, JX, 2d]
                 h = tf.concat(3, [fw_h, bw_h])  # [N, M, JX, 2d]
             else:
-                (fw_h, bw_h), _ = bidirectional_dynamic_rnn(self.get_rnncell(), self.get_rnncell(), xx, x_len, dtype='float', scope='h1')  # [N, M, JX, 2d]
+                (fw_h, bw_h), _ = bidirectional_dynamic_rnn(cell, cell, xx, x_len, dtype='float', scope='h1')  # [N, M, JX, 2d]
                 h = tf.concat(3, [fw_h, bw_h])  # [N, M, JX, 2d]
+                print("h : ", h.shape, tf.shape(h))
+                print("M 0: ", M)
             self.tensor_dict['u'] = u
             self.tensor_dict['h'] = h
 
         with tf.variable_scope("main"):
             if config.dynamic_att:
                 p0 = h
-                print("M : ", M)
                 u = tf.reshape(tf.tile(tf.expand_dims(u, 1), [1, M, 1, 1]), [N * M, JQ, 2 * d])
                 q_mask = tf.reshape(tf.tile(tf.expand_dims(self.q_mask, 1), [1, M, 1]), [N * M, JQ])
-
-                first_cell_fw = AttentionCell(self.get_rnncell(), u, mask=q_mask, mapper='sim',
+                first_cell = AttentionCell(cell, u, mask=q_mask, mapper='sim',
                                            input_keep_prob=self.config.input_keep_prob, is_train=self.is_train)
-                first_cell_bw = AttentionCell(self.get_rnncell(), u, mask=q_mask, mapper='sim',
-                                              input_keep_prob=self.config.input_keep_prob, is_train=self.is_train)
             else:
-                print("u_shape :", u.get_shape().as_list(), N, M)
-                r = inference(config, h, u, d)  #[N, 2*d]
-                p0 = attention_layer(config, self.is_train, h, u, r, h_mask=self.x_mask, u_mask=self.q_mask, scope="p0", tensor_dict=self.tensor_dict)
-                first_cell_fw = self.get_drnncell()
-                first_cell_bw = self.get_drnncell()
+                p0 = attention_layer(config, self.is_train, h, u, h_mask=self.x_mask, u_mask=self.q_mask, scope="p0", tensor_dict=self.tensor_dict)
+                first_cell = d_cell
 
-            (fw_g0, bw_g0), _ = bidirectional_dynamic_rnn(first_cell_fw, first_cell_bw, p0, x_len, dtype='float', scope='g0')  # [N, M, JX, 2d]
+            (fw_g0, bw_g0), _ = bidirectional_dynamic_rnn(first_cell, first_cell, p0, x_len, dtype='float', scope='g0')  # [N, M, JX, 2d]
             g0 = tf.concat(3, [fw_g0, bw_g0])
-
-            if config.dynamic_att:
-                first_cell_fw = AttentionCell(self.get_rnncell(), u, mask=q_mask, mapper='sim',
-                                              input_keep_prob=self.config.input_keep_prob, is_train=self.is_train)
-                first_cell_bw = AttentionCell(self.get_rnncell(), u, mask=q_mask, mapper='sim',
-                                              input_keep_prob=self.config.input_keep_prob, is_train=self.is_train)
-            else:
-                first_cell_fw = self.get_drnncell()
-                first_cell_bw = self.get_drnncell()
-
-            (fw_g1, bw_g1), _ = bidirectional_dynamic_rnn(first_cell_fw, first_cell_bw, g0, x_len, dtype='float', scope='g1')  # [N, M, JX, 2d]
+            (fw_g1, bw_g1), _ = bidirectional_dynamic_rnn(first_cell, first_cell, g0, x_len, dtype='float', scope='g1')  # [N, M, JX, 2d]
             g1 = tf.concat(3, [fw_g1, bw_g1])
 
             logits = get_logits([g1, p0], d, True, wd=config.wd, input_keep_prob=config.input_keep_prob,
@@ -188,7 +173,7 @@ class Model(object):
             a1i = softsel(tf.reshape(g1, [N, M * JX, 2 * d]), tf.reshape(logits, [N, M * JX]))
             a1i = tf.tile(tf.expand_dims(tf.expand_dims(a1i, 1), 1), [1, M, JX, 1])
 
-            (fw_g2, bw_g2), _ = bidirectional_dynamic_rnn(self.get_drnncell(), self.get_drnncell(), tf.concat(3, [p0, g1, a1i, g1 * a1i]),
+            (fw_g2, bw_g2), _ = bidirectional_dynamic_rnn(d_cell, d_cell, tf.concat(3, [p0, g1, a1i, g1 * a1i]),
                                                           x_len, dtype='float', scope='g2')  # [N, M, JX, 2d]
             g2 = tf.concat(3, [fw_g2, bw_g2])
             logits2 = get_logits([g2, p0], d, True, wd=config.wd, input_keep_prob=config.input_keep_prob,
@@ -201,7 +186,7 @@ class Model(object):
             flat_logits2 = tf.reshape(logits2, [-1, M * JX])
             flat_yp2 = tf.nn.softmax(flat_logits2)
             yp2 = tf.reshape(flat_yp2, [-1, M, JX])
-            print("M 2: ", M)
+
             self.tensor_dict['g1'] = g1
             self.tensor_dict['g2'] = g2
 
@@ -210,29 +195,22 @@ class Model(object):
             self.yp = yp
             self.yp2 = yp2
 
-    def get_rnncell(self):
-        cell = BasicLSTMCell(self.config.hidden_size, state_is_tuple=True)
-        return cell
-
-    def get_drnncell(self):
-        cell = BasicLSTMCell(self.config.hidden_size, state_is_tuple=True)
-        d_cell = SwitchableDropoutWrapper(cell, self.is_train, input_keep_prob=self.config.input_keep_prob)
-        return d_cell
-
     def _build_loss(self):
         config = self.config
         JX = tf.shape(self.x)[2]
         M = tf.shape(self.x)[1]
         JQ = tf.shape(self.q)[1]
         loss_mask = tf.reduce_max(tf.cast(self.q_mask, 'float'), 1)
-        losses = tf.nn.softmax_cross_entropy_with_logits(logits=self.logits, labels=tf.cast(tf.reshape(self.y, [-1, M * JX]), 'float'))
+        losses = tf.nn.softmax_cross_entropy_with_logits(
+            self.logits, tf.cast(tf.reshape(self.y, [-1, M * JX]), 'float'))
         ce_loss = tf.reduce_mean(loss_mask * losses)
         tf.add_to_collection('losses', ce_loss)
-        ce_loss2 = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=self.logits2, labels=tf.cast(tf.reshape(self.y2, [-1, M * JX]), 'float')))
+        ce_loss2 = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(
+            self.logits2, tf.cast(tf.reshape(self.y2, [-1, M * JX]), 'float')))
         tf.add_to_collection("losses", ce_loss2)
 
         self.loss = tf.add_n(tf.get_collection('losses', scope=self.scope), name='loss')
-        tf.summary.scalar(self.loss.op.name, self.loss)
+        tf.scalar_summary(self.loss.op.name, self.loss)
         tf.add_to_collection('ema/scalar', self.loss)
 
     def _build_ema(self):
@@ -242,10 +220,10 @@ class Model(object):
         ema_op = ema.apply(tensors)
         for var in tf.get_collection("ema/scalar", scope=self.scope):
             ema_var = ema.average(var)
-            tf.summary.scalar(ema_var.op.name, ema_var)
+            tf.scalar_summary(ema_var.op.name, ema_var)
         for var in tf.get_collection("ema/vector", scope=self.scope):
             ema_var = ema.average(var)
-            tf.summary.scalar(ema_var.op.name, ema_var)
+            tf.histogram_summary(ema_var.op.name, ema_var)
 
         with tf.control_dependencies([ema_op]):
             self.loss = tf.identity(self.loss)
@@ -259,12 +237,6 @@ class Model(object):
 
     def get_loss(self):
         return self.loss
-
-    def get_yp(self):
-        return self.yp
-
-    def get_yp2(self):
-        return self.yp2
 
     def get_global_step(self):
         return self.global_step
@@ -306,6 +278,7 @@ class Model(object):
 
         x = np.zeros([N, M, JX], dtype='int32')
         cx = np.zeros([N, M, JX, W], dtype='int32')
+        print("M 1 : ", M)
         x_mask = np.zeros([N, M, JX], dtype='bool')
         q = np.zeros([N, JQ], dtype='int32')
         cq = np.zeros([N, JQ, W], dtype='int32')
@@ -439,111 +412,17 @@ def bi_attention(config, is_train, h, u, h_mask=None, u_mask=None, scope=None, t
         return u_a, h_a
 
 
-def attention_layer(config, is_train, h, u, r, h_mask=None, u_mask=None, scope=None, tensor_dict=None):
+def attention_layer(config, is_train, h, u, h_mask=None, u_mask=None, scope=None, tensor_dict=None):
     with tf.variable_scope(scope or "attention_layer"):
         JX = tf.shape(h)[2]
         M = tf.shape(h)[1]
         JQ = tf.shape(u)[1]
-        r_expand = tf.tile(tf.expand_dims(tf.expand_dims(r, 1), 2), [1, M, JX, 1])
         if config.q2c_att or config.c2q_att:
             u_a, h_a = bi_attention(config, is_train, h, u, h_mask=h_mask, u_mask=u_mask, tensor_dict=tensor_dict)
         if not config.c2q_att:
             u_a = tf.tile(tf.expand_dims(tf.expand_dims(tf.reduce_mean(u, 1), 1), 1), [1, M, JX, 1])
         if config.q2c_att:
-            p0 = tf.concat(3, [h, u_a, h * u_a, h * h_a, h * r_expand])
+            p0 = tf.concat(3, [h, u_a, h * u_a, h * h_a])
         else:
             p0 = tf.concat(3, [h, u_a, h * u_a])
         return p0
-
-
-def get_attention(q_vec, prev_memory, fact_vec, reuse):
-        """Use question vector and previous memory to create scalar attention for current fact"""
-        with tf.variable_scope("attention", reuse=None):
-            #memory = tf.reduce_sum(prev_memory, 1)
-            memory = prev_memory
-            features = [fact_vec*q_vec,
-                        fact_vec*memory,
-                        tf.abs(fact_vec - q_vec),
-                        tf.abs(fact_vec - memory)]
-            print("memory: ", memory.get_shape().as_list)
-            print("fact_vec: ", fact_vec.get_shape().as_list)
-            print("q_vec: ", q_vec.get_shape().as_list)
-            feature_vec = tf.concat(1, features)
-            #feature_vec = tf.pack(features, axis=1)
-            with tf.variable_scope('first_fnn', reuse=reuse) as scope:
-                #tf.get_variable('weights')
-                attention = tf.contrib.layers.fully_connected(feature_vec,
-                        60,
-                        activation_fn=tf.nn.tanh)
-                scope.reuse_variables()
-            with tf.variable_scope('second_fnn', reuse=reuse) as scope:
-                #tf.get_variable('weights')
-                attention = tf.contrib.layers.fully_connected(attention,
-                        1,
-                        activation_fn=None)
-                scope.reuse_variables()
-            
-        return attention
-
-def generate_episode(memory, q_vec, fact_vecs, hop_index, N, d):
-        """Generate episode by applying attention to current fact vectors through a modified GRU"""
-        #num_items = fact_vecs.get_shape()[1].value
-        #fact_vec = tf.reduce_sum(fact_vecs, 1)
-        attentions = [tf.squeeze(
-            get_attention(q_vec, memory, fact_vecs, bool(hop_index)), [1])]
-
-        #fv : [N, 2*d]
-        attentions = tf.transpose(tf.pack(attentions))
-        #attentions.append(attentions)
-        print("attentions: ", attentions.get_shape())
-        attentions = tf.nn.softmax(attentions)
-        print("attentions: ", attentions.get_shape())
-        #attentions = tf.expand_dims(attentions, -1)    #[N, 1]
-
-        reuse = True if hop_index > 0 else False
-        
-        # concatenate fact vectors and attentions for input into attGRU
-        gru_inputs = tf.concat(1, [fact_vecs, attentions])  #[N, 2d+1]
-        gru_inputs = tf.expand_dims(gru_inputs, 1)
-        print("gru: ", gru_inputs.get_shape())
-        input_len = np.ones((N, ), dtype=np.int32)
-        with tf.variable_scope('attention_gru', reuse=reuse):
-            _, episode = tf.nn.dynamic_rnn(AttentionGRUCell(2*d), gru_inputs, dtype=np.float32, sequence_length=input_len)
-
-        return episode
-
-def inference(config, h, u, d):
-    """Performs inference on the DMN model"""
-
-    
-    JX = tf.shape(h)[2]
-    #N = tf.shape(h)[0]
-    M = tf.shape(h)[1]
-    JQ = tf.shape(u)[1]
-    N = config.batch_size
-    print("u : ", u.get_shape().as_list())
-    q_vec = tf.reduce_sum(u, 1) #[N, 2*d]
-    print("q : ", q_vec.get_shape().as_list())
-
-    fact_vecs = tf.reduce_sum(tf.reduce_sum(h, 2), 1) #[N, 2*d]
-
-    with tf.variable_scope("memory", initializer=tf.contrib.layers.xavier_initializer()):
-    # memory module
-    # generate n_hops episodes
-        #prev_memory = tf.tile(tf.expand_dims(q_vec, 1), [1, M, 1])  #[N, M, 2*d]
-        prev_memory = q_vec #[N, 2*d]
-        num_hops = 3
-
-        for i in range(num_hops):
-            # get a new episode
-            #print '==> generating episode', i
-            episode = generate_episode(prev_memory, q_vec, fact_vecs, i, N, d)  #[N, 2*d]
-
-            # untied weights for memory update
-            with tf.variable_scope("hop_%d" % i):
-                prev_memory = tf.contrib.layers.fully_connected(tf.concat(1, [prev_memory, episode, q_vec]),
-                        2*d,
-                        activation_fn=tf.nn.relu)
-        output = prev_memory
-    
-    return output

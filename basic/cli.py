@@ -10,7 +10,7 @@ flags = tf.app.flags
 flags.DEFINE_string("model_name", "basic", "Model name [basic]")
 flags.DEFINE_string("data_dir", "data/squad", "Data dir [data/squad]")
 flags.DEFINE_string("run_id", "0", "Run ID [0]")
-flags.DEFINE_string("out_base_dir", "out", "out base dir [out]")
+flags.DEFINE_string("out_base_dir", "out2", "out base dir [out2]")
 flags.DEFINE_string("forward_name", "single", "Forward name [single]")
 flags.DEFINE_string("answer_path", "", "Answer path []")
 flags.DEFINE_string("eval_path", "", "Eval path []")
@@ -31,7 +31,7 @@ flags.DEFINE_bool('load_ema', True, "load exponential average of variables when 
 flags.DEFINE_bool("eval", True, "eval? [True]")
 
 # Training / test parameters
-flags.DEFINE_integer("batch_size", 60, "Batch size [60]")
+flags.DEFINE_integer("batch_size", 45, "Batch size [45]")
 flags.DEFINE_integer("val_num_batches", 100, "validation num batches [100]")
 flags.DEFINE_integer("test_num_batches", 0, "test num batches [0]")
 flags.DEFINE_integer("num_epochs", 12, "Total number of epochs for training [12]")
