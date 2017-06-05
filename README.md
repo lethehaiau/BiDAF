@@ -38,6 +38,8 @@ The training converges at ~18k steps, and it took ~4s per step (i.e. ~20 hours).
 Before training, it is recommended to first try the following code to verify everything is okay and memory is sufficient:
 ```
 python -m basic.cli --mode train --noload --debug
+
+CUDA_VISIBLE_DEVICES=2 python3 -m basic.cli --mode train --noload --debug
 ```
 
 Then to fully train, run:
